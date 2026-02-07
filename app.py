@@ -1,14 +1,17 @@
-# app.py  (Single-file MVP)
+# app.py  (Single-file MVP: "하루 한 장면")
 # pip install streamlit pydantic openai
+# run: streamlit run app.py
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
-import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -31,6 +34,28 @@ def make_mission_id(date_yyyy_mm_dd: str, seed: str) -> str:
     h = hashlib.sha1(f"{date_yyyy_mm_dd}:{seed}".encode("utf-8")).hexdigest()[:8]
     return f"{yyyymmdd}-{h}"
 
+def _confetti_svg_bytes() -> bytes:
+    # 간단한 축하용 SVG (로컬/오프라인 가능)
+    svg = """
+    <svg xmlns="http://www.w3.org/2000/svg" width="900" height="360" viewBox="0 0 900 360">
+      <rect width="900" height="360" fill="#ffffff"/>
+      <text x="50%" y="42%" text-anchor="middle" font-size="44" font-family="sans-serif">🎉</text>
+      <text x="50%" y="60%" text-anchor="middle" font-size="30" font-family="sans-serif">오늘의 장면 저장 완료!</text>
+      <g opacity="0.85">
+        <circle cx="90" cy="70" r="8" fill="#ff6b6b"/>
+        <circle cx="160" cy="120" r="6" fill="#ffd93d"/>
+        <circle cx="240" cy="80" r="7" fill="#6bcB77"/>
+        <circle cx="320" cy="140" r="5" fill="#4d96ff"/>
+        <circle cx="420" cy="90" r="9" fill="#c77dff"/>
+        <circle cx="520" cy="140" r="6" fill="#ff6b6b"/>
+        <circle cx="620" cy="85" r="7" fill="#ffd93d"/>
+        <circle cx="720" cy="125" r="6" fill="#6bcB77"/>
+        <circle cx="820" cy="95" r="8" fill="#4d96ff"/>
+      </g>
+    </svg>
+    """.strip()
+    return svg.encode("utf-8")
+
 
 # =========================
 # Schema (Pydantic)
@@ -52,7 +77,7 @@ CostLevel = Literal["free", "low", "any"]
 class Option(BaseModel):
     label: Literal["Option A", "Option B"]
     variation: str = Field(min_length=2, max_length=60)
-    delta: str = Field(min_length=2, max_length=80)
+    delta: str = Field(min_length=2, max_length=120)  # 옵션 창의성 위해 조금 넉넉히
 
 
 class Twist(BaseModel):
@@ -114,9 +139,9 @@ class Mission(BaseModel):
         labels = [o.label for o in self.options]
         if labels != ["Option A", "Option B"]:
             raise ValueError("options must be exactly [Option A, Option B] in order")
-        if self.options[0].variation == self.options[1].variation:
+        if self.options[0].variation.strip() == self.options[1].variation.strip():
             raise ValueError("options variations must differ")
-        if self.options[0].delta == self.options[1].delta:
+        if self.options[0].delta.strip() == self.options[1].delta.strip():
             raise ValueError("options delta must differ")
         return self
 
@@ -249,8 +274,8 @@ def _twist_linked(m: Mission) -> bool:
     tokens = [t.strip() for t in re.split(r"[\s,./]+", rule) if len(t.strip()) >= 2]
     if not tokens:
         return False
-    for st in m.steps:
-        if any(tok in st for tok in tokens[:6]):
+    for stp in m.steps:
+        if any(tok in stp for tok in tokens[:6]):
             return True
     return False
 
@@ -309,7 +334,7 @@ def validate_mission(mission: Mission, profile: UserProfile, recent_logs: Option
     if not _personalization_present(mission, profile, recent_logs):
         errors.append("why_this_is_you lacks grounding in inputs/logs")
 
-    # options A/B 차이
+    # 옵션 차이
     a, b = mission.options[0], mission.options[1]
     if a.variation.strip() == b.variation.strip():
         errors.append("options A/B variation identical")
@@ -373,8 +398,6 @@ def build_fallback_mission(profile: UserProfile, recent_logs: List[RecentMission
     place: IndoorOutdoor = tpl.indoor_outdoor
     if profile.preference_place in ("indoor", "outdoor"):
         place = profile.preference_place  # type: ignore
-    elif place == "either":
-        place = "either"
 
     cost_level: CostLevel = profile.budget if profile.budget in ("free", "low", "any") else tpl.cost_level  # type: ignore
 
@@ -428,18 +451,20 @@ def build_fallback_mission(profile: UserProfile, recent_logs: List[RecentMission
 
     why = (
         f"오늘은 {profile.time_available}분 / 에너지 {profile.energy} / 장소 {profile.preference_place} 기준으로 "
-        f"‘준비물 최소 + 바로 실행’ 가능한 미션을 골랐어.{dislike_note}"
+        f"준비물 최소 + 바로 실행 가능한 장면을 골랐어.{dislike_note}"
     )
 
+    # ✅ 옵션 창의성 강화: A는 “영화 예고편 컷”, B는 “감독판”
+    # (클릭하지 않아도 내용이 보이도록 UI에서 항상 표시)
     option_a = Option(
         label="Option A",
-        variation="부담 낮게",
-        delta="대상을 3개로 줄이고, 총 10분만 진행(또는 가능한 최소 시간)",
+        variation="예고편 컷(가볍게)",
+        delta="핵심만 ‘3-2-1’로: 관찰/기록 대상을 3개로, 문장은 2줄로, 마지막 1줄만 남기고 종료",
     )
     option_b = Option(
         label="Option B",
-        variation="조금 더 특별하게",
-        delta="규칙을 1개 더 추가(예: 감각 단어를 ‘의외의 비유’로 바꾸기)하고 결과를 1줄 더 저장",
+        variation="감독판(조금 더 특별하게)",
+        delta="규칙에 ‘의외의 렌즈’ 1개 추가: 예) 반대 감정 단어로 묘사하거나, 가장 사소한 1개를 주인공처럼 20초 스토리로 써보기",
     )
 
     m = Mission(
@@ -524,6 +549,7 @@ def summarize_recent_logs(recent_logs: List[RecentMissionLog]) -> str:
     completed = sum(1 for r in last7 if r.completed)
     sat = [r.satisfaction for r in last7 if r.satisfaction is not None]
     avg_sat = round(sum(sat) / len(sat), 2) if sat else None
+
     tag_counts: Dict[str, int] = {}
     for r in last7:
         for t in r.tags:
@@ -531,10 +557,12 @@ def summarize_recent_logs(recent_logs: List[RecentMissionLog]) -> str:
             tag_counts[tt] = tag_counts.get(tt, 0) + 1
     top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:8]
     top_tags_str = ", ".join([f"{t}({c})" for t, c in top_tags]) if top_tags else "없음"
+
     avoided: List[str] = []
     for r in last7:
         avoided += r.keyword_notes
     avoided = [a.strip() for a in avoided if a and a.strip()][:6]
+
     return (
         f"- 완료율: {completed}/7\n"
         f"- 평균 만족도: {avg_sat if avg_sat is not None else 'N/A'}\n"
@@ -575,7 +603,9 @@ def build_user_prompt(profile: UserProfile, recent_logs: List[RecentMissionLog])
    safety_notes에 금지/주의 1~3개를 포함한다.
 6) 개인화 체감:
    - why_this_is_you는 반드시 사용자 입력(시간/에너지/장소) 또는 최근 기록 중 1개 이상을 근거로 1~2문장 작성
-   - options는 Option A/B 2개. A는 부담 낮은 버전, B는 조금 더 특별한 버전. 무엇이 달라지는지(delta) 명확히.
+   - options는 Option A/B 2개.
+     A는 부담 낮고 깔끔한 버전(예: '예고편 컷'), B는 더 창의적인 버전(예: '감독판').
+     무엇이 달라지는지(delta) 구체적으로.
 
 [중복 방지]
 최근 7일의 title/tags와 60% 이상 겹치지 않도록 새로움을 확보한다.
@@ -664,9 +694,19 @@ def get_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
+def _ensure_column(conn: sqlite3.Connection, table: str, col: str, col_def: str) -> None:
+    # SQLite: ALTER TABLE ADD COLUMN은 IF NOT EXISTS 없음(버전에 따라)
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {row["name"] for row in cur.fetchall()}
+    if col not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+        conn.commit()
+
 def init_db() -> None:
     conn = get_conn()
     cur = conn.cursor()
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS missions (
@@ -686,11 +726,18 @@ def init_db() -> None:
             chosen_option TEXT,
             notes TEXT,
             tags TEXT,
+            image_b64 TEXT,
+            image_mime TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         )
         """
     )
     conn.commit()
+
+    # 기존 DB를 쓰는 경우를 대비해 컬럼 추가 보장
+    _ensure_column(conn, "logs", "image_b64", "TEXT")
+    _ensure_column(conn, "logs", "image_mime", "TEXT")
+
     conn.close()
 
 def save_mission(m: Mission) -> None:
@@ -721,18 +768,52 @@ def list_missions(limit: int = 30) -> List[Mission]:
     conn.close()
     return [Mission.model_validate_json(r["mission_json"]) for r in rows]
 
-def add_log(date_str: str, completed: bool, satisfaction: Optional[int], chosen_option: Optional[str], notes: Optional[str], tags: Optional[List[str]] = None) -> None:
+def add_log(
+    date_str: str,
+    completed: bool,
+    satisfaction: Optional[int],
+    chosen_option: Optional[str],
+    notes: Optional[str],
+    tags: Optional[List[str]] = None,
+    image_b64: Optional[str] = None,
+    image_mime: Optional[str] = None,
+) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO logs(date, completed, satisfaction, chosen_option, notes, tags)
-        VALUES(?, ?, ?, ?, ?, ?)
+        INSERT INTO logs(date, completed, satisfaction, chosen_option, notes, tags, image_b64, image_mime)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (date_str, 1 if completed else 0, satisfaction, chosen_option, notes, json.dumps(tags or [], ensure_ascii=False)),
+        (
+            date_str,
+            1 if completed else 0,
+            satisfaction,
+            chosen_option,
+            notes,
+            json.dumps(tags or [], ensure_ascii=False),
+            image_b64,
+            image_mime,
+        ),
     )
     conn.commit()
     conn.close()
+
+def get_latest_log_for_date(date_str: str) -> Optional[sqlite3.Row]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM logs
+        WHERE date = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (date_str,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
 
 def recent_logs(limit: int = 7) -> List[RecentMissionLog]:
     conn = get_conn()
@@ -785,14 +866,13 @@ def recent_logs(limit: int = 7) -> List[RecentMissionLog]:
 # Streamlit UI
 # =========================
 
-st.set_page_config(page_title="Daily Twist Mission (Single File)", page_icon="🌀", layout="centered")
+st.set_page_config(page_title="하루 한 장면", page_icon="🎬", layout="centered")
 init_db()
 
-st.title("🌀 오늘을 조금 특별하게 (Single-file MVP)")
-st.caption("스키마+twist+검증+fallback이 먼저, 그 위에 UI/DB/LLM을 얹었습니다.")
+st.title("🎬 하루 한 장면")
 
 with st.sidebar:
-    st.header("오늘 상태(필수 3개)")
+    st.header("오늘 상태")
     time_available = st.number_input("오늘 시간(분)", min_value=5, max_value=240, value=20, step=5)
     energy = st.selectbox("에너지", ["low", "medium", "high"], index=1)
     place = st.selectbox("장소", ["indoor", "outdoor", "any"], index=2)
@@ -812,8 +892,16 @@ with st.sidebar:
     model_input = "gpt-4.1-mini"
 
     if use_llm:
-        api_key_input = st.text_input("OpenAI API Key", type="password", value=st.session_state.get("openai_api_key", ""))
-        model_input = st.text_input("Model", value=st.session_state.get("openai_model", "gpt-4.1-mini"))
+        api_key_input = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=st.session_state.get("openai_api_key", ""),
+            help="키는 세션에만 저장되고 DB에는 저장하지 않습니다.",
+        )
+        model_input = st.text_input(
+            "Model",
+            value=st.session_state.get("openai_model", "gpt-4.1-mini"),
+        )
 
         if api_key_input:
             st.session_state["openai_api_key"] = api_key_input
@@ -832,8 +920,13 @@ profile = UserProfile(
 
 today = today_str()
 
+# 상태 변수
+st.session_state.setdefault("chosen_option", None)
+st.session_state.setdefault("show_completion", False)
+
 tab1, tab2 = st.tabs(["오늘", "히스토리"])
 
+# ---------- 오늘 ----------
 with tab1:
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -846,7 +939,7 @@ with tab1:
                     api_key = st.session_state.get("openai_api_key") or api_key_input
                     model = st.session_state.get("openai_model") or model_input
                     if not api_key:
-                        st.warning("API Key를 입력해야 LLM을 사용할 수 있어요. (없으면 fallback으로 생성됩니다.)")
+                        st.warning("API Key를 입력하지 않아 fallback으로 생성합니다.")
                     else:
                         llm_client = OpenAIChatClient(api_key=api_key, model=model)
                 except Exception as e:
@@ -857,12 +950,15 @@ with tab1:
             save_mission(mission)
             st.session_state["mission"] = mission
             st.session_state["meta"] = meta
+            st.session_state["chosen_option"] = None
+            st.session_state["show_completion"] = False
 
     with col2:
         if st.button("📌 오늘 미션 불러오기", use_container_width=True):
             m = load_mission(today)
             if m:
                 st.session_state["mission"] = m
+                st.session_state["show_completion"] = False
             else:
                 st.info("저장된 오늘 미션이 없습니다. 생성해보세요.")
 
@@ -875,66 +971,114 @@ with tab1:
         st.write(mission.why_this_is_you)
 
         st.write(" · ".join([f"`{t}`" for t in mission.tags]))
-        st.write(f"⏱️ {mission.time_minutes}분  |  난이도 {mission.difficulty}/5  |  장소: {mission.indoor_outdoor}  |  비용: {mission.cost_level}")
+        st.write(
+            f"⏱️ {mission.time_minutes}분  |  난이도 {mission.difficulty}/5  |  장소: {mission.indoor_outdoor}  |  비용: {mission.cost_level}"
+        )
 
         st.markdown("### 준비물")
         st.write(" / ".join(mission.materials) if mission.materials else "없음")
 
-        st.markdown("### Twist")
-        st.write(f"- **유형:** `{mission.twist.type}`")
-        st.write(f"- **예상 밖 포인트:** {mission.twist.surprise_point}")
-        st.write(f"- **규칙:** {mission.twist.rule}")
+        # (3) Twist 표시 삭제: 데이터에는 유지되지만 UI에는 보여주지 않음
 
         st.markdown("### Steps")
         for i, s in enumerate(mission.steps, start=1):
             st.write(f"{i}. {s}")
 
-        st.markdown("### 선택지 (클릭 1번으로 미시 개인화)")
-        cA, cB = st.columns(2)
-        with cA:
+        # (4) 옵션: 클릭하지 않아도 항상 보이게 + 타이틀 변경
+        st.markdown("### 옵션")
+        a, b = mission.options[0], mission.options[1]
+
+        boxA, boxB = st.columns(2)
+        with boxA:
+            st.markdown(f"#### {a.variation}")
+            st.write(a.delta)
             if st.button("Option A 선택", use_container_width=True):
                 st.session_state["chosen_option"] = "Option A"
-        with cB:
+        with boxB:
+            st.markdown(f"#### {b.variation}")
+            st.write(b.delta)
             if st.button("Option B 선택", use_container_width=True):
                 st.session_state["chosen_option"] = "Option B"
 
         chosen = st.session_state.get("chosen_option")
         if chosen:
-            opt = mission.options[0] if chosen == "Option A" else mission.options[1]
-            st.info(f"선택됨: **{opt.label}** — {opt.variation} / {opt.delta}")
+            opt = a if chosen == "Option A" else b
+            st.info(f"선택됨: **{opt.variation}**")
 
         st.markdown("### 안전")
         for s in mission.safety_notes:
             st.write(f"- {s}")
 
-        st.markdown("### 완료 기록")
-        completed = st.checkbox("미션 완료", value=False)
-        satisfaction = st.slider("만족도(1~5)", 1, 5, 3)
-        notes = st.text_area("메모(선택)", value="", height=80)
+        # 디버그(원하면 숨기고 싶으면 expander 자체를 제거해도 됨)
+        if meta and (meta.used_fallback or meta.errors):
+            with st.expander("생성 상태(디버그)"):
+                st.write("fallback 사용:", meta.used_fallback if meta else None)
+                for e in (meta.errors if meta else []):
+                    st.write(f"- {e}")
 
-        if st.button("💾 오늘 기록 저장", use_container_width=True):
-            add_log(
-                date_str=mission.date,
-                completed=completed,
-                satisfaction=satisfaction,
-                chosen_option=st.session_state.get("chosen_option"),
-                notes=notes.strip() or None,
-                tags=mission.tags,
+        st.divider()
+
+        # (5) 완료 기록: 버튼 눌러야 열리도록
+        if st.button("✅ 미션 완료", use_container_width=True):
+            st.session_state["show_completion"] = True
+
+            # 축하 팝업: st.dialog 지원하면 modal, 아니면 balloons + info
+            if hasattr(st, "dialog"):
+                @st.dialog("🎉 축하해요!")
+                def _celebrate_dialog():
+                    st.image(_confetti_svg_bytes(), caption=None)
+                    st.write("오늘의 장면을 남길 준비가 됐어요. 아래에 기록을 저장해보자!")
+                    st.button("기록하러 가기", use_container_width=True)
+
+                _celebrate_dialog()
+            else:
+                st.balloons()
+                st.success("🎉 축하해요! 아래에서 오늘의 장면을 기록해보자.")
+
+        if st.session_state.get("show_completion"):
+            st.markdown("### 완료 기록")
+
+            completed = True  # 버튼 눌러 들어왔으니 기본 완료 True
+            satisfaction = st.slider("만족도(1~5)", 1, 5, 4)
+            notes = st.text_area("메모(선택)", value="", height=90)
+
+            # (6) 이미지 업로드/저장
+            uploaded = st.file_uploader(
+                "이미지 추가(선택)",
+                type=["png", "jpg", "jpeg", "webp"],
+                help="오늘의 장면을 사진으로 남겨보세요. DB에 base64로 저장됩니다.",
             )
-            st.success("저장했습니다!")
 
-        if meta:
-            if meta.used_fallback:
-                st.warning("LLM 결과가 없거나 검증 실패 → **fallback 미션**을 사용했습니다.")
-            if meta.errors:
-                with st.expander("디버그: 실패 이유 보기"):
-                    for e in meta.errors:
-                        st.write(f"- {e}")
+            preview_bytes = None
+            mime = None
+            image_b64 = None
+
+            if uploaded is not None:
+                preview_bytes = uploaded.getvalue()
+                mime = uploaded.type or "image/png"
+                image_b64 = base64.b64encode(preview_bytes).decode("utf-8")
+                st.image(preview_bytes, caption="업로드된 이미지 미리보기", use_container_width=True)
+
+            if st.button("💾 오늘 기록 저장", use_container_width=True):
+                add_log(
+                    date_str=mission.date,
+                    completed=completed,
+                    satisfaction=satisfaction,
+                    chosen_option=st.session_state.get("chosen_option"),
+                    notes=notes.strip() or None,
+                    tags=mission.tags,
+                    image_b64=image_b64,
+                    image_mime=mime,
+                )
+                st.success("저장했습니다!")
+
     else:
         st.info("사이드바에서 상태를 고르고 ‘오늘의 미션 생성’을 눌러보세요.")
 
+
+# ---------- 히스토리 ----------
 with tab2:
-    st.subheader("📚 저장된 미션")
+    st.subheader("📚 히스토리")
     missions = list_missions(30)
     if not missions:
         st.info("저장된 미션이 없습니다.")
@@ -945,4 +1089,24 @@ with tab2:
                 st.write(m.why_this_is_you)
                 st.write(" / ".join(m.tags))
                 st.write(f"⏱️ {m.time_minutes}분 · 난이도 {m.difficulty}/5 · {m.indoor_outdoor} · {m.cost_level}")
-                st.write("**Twist 규칙:**", m.twist.rule)
+
+                # 최신 로그(이미지 포함) 표시
+                row = get_latest_log_for_date(m.date)
+                if row:
+                    st.markdown("**기록**")
+                    st.write(f"- 완료: {'예' if row['completed'] else '아니오'}")
+                    if row["satisfaction"] is not None:
+                        st.write(f"- 만족도: {row['satisfaction']}/5")
+                    if row["chosen_option"]:
+                        st.write(f"- 선택 옵션: {row['chosen_option']}")
+                    if row["notes"]:
+                        st.write(f"- 메모: {row['notes']}")
+
+                    if row.get("image_b64"):
+                        try:
+                            img_bytes = base64.b64decode(row["image_b64"])
+                            st.image(img_bytes, caption="저장된 이미지", use_container_width=True)
+                        except Exception:
+                            st.warning("저장된 이미지를 불러오지 못했어요.")
+                else:
+                    st.caption("이 날짜의 기록(완료/메모/이미지)이 아직 없습니다.")

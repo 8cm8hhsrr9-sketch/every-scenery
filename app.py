@@ -1102,11 +1102,12 @@ with tab2:
                     if row["notes"]:
                         st.write(f"- 메모: {row['notes']}")
 
-                    if row.get("image_b64"):
-                        try:
-                            img_bytes = base64.b64decode(row["image_b64"])
-                            st.image(img_bytes, caption="저장된 이미지", use_container_width=True)
-                        except Exception:
-                            st.warning("저장된 이미지를 불러오지 못했어요.")
+                    if row and row["image_b64"]:
+    try:
+        img_bytes = base64.b64decode(row["image_b64"])
+        st.image(img_bytes, caption="저장된 이미지", use_container_width=True)
+    except Exception:
+        st.warning("저장된 이미지를 불러오지 못했어요.")
+
                 else:
                     st.caption("이 날짜의 기록(완료/메모/이미지)이 아직 없습니다.")
